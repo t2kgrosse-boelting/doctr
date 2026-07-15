@@ -1,4 +1,4 @@
-> **Preview variant: hybrid** — stewardship text in Markdown; logo row integrated into the CTA banner image. Not the live README.
+> **Preview variant: hybrid** : stewardship text in Markdown; logo row integrated into the CTA banner image. Not the live README.
 
 <p align="center">
   <img src="https://github.com/mindee/doctr/raw/main/docs/images/Logo_doctr.gif" width="40%">
@@ -362,6 +362,28 @@ If you wish to cite this project, feel free to use this [BibTeX](http://www.bibt
     howpublished = {\url{https://github.com/mindee/doctr}}
 }
 ```
+
+## Custom Development and Support
+
+[t2k GmbH](https://www.text2knowledge.de/de) offers professional services around docTR : whether you are building a product or contributing to the open-source project.
+
+### For organizations
+
+Interested in docTR and want to develop, implement, or ship your own solution? t2k can help with:
+
+- **Custom OCR development** : individual detection, recognition, and pipeline work built on docTR
+- **Project implementation** : turning your ideas into production-ready docTR integrations
+- **Technical consulting** : architecture, deployment, and integration guidance
+- **Ongoing development** : feature extensions and implementation support tailored to your use case
+- **Workshops & advisory** : verbal consulting, hands-on sessions, and recommendations for working with docTR
+
+Contact [info@t2k.com](mailto:info@t2k.com) or visit our [docTR services page](https://www.text2knowledge.de/de/portfolio/doctr-on-prem-ocr) to discuss your project.
+
+### For docTR contributors
+
+Contributing to docTR and need help? Contact [doctr@t2k.com](mailto:doctr@t2k.com) for contributors with questions about development, implementation, or technical issues.
+
+[Get in touch with t2k →](https://www.text2knowledge.de/de/portfolio/doctr-on-prem-ocr)
 
 ## Contributing
 
