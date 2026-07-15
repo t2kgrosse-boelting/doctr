@@ -159,7 +159,13 @@ def set_device_and_dtype(
 
 
 def export_model_to_onnx(
-    model: nn.Module, model_name: str, dummy_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor], **kwargs: Any
+    model: nn.Module,
+    model_name: str,
+    dummy_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    input_names: list[str] | None = None,
+    output_names: list[str] | None = None,
+    dynamic_axes: dict[str, dict[int, str]] | None = None,
+    **kwargs: Any,
 ) -> str:
     """Export model to ONNX format.
 
@@ -173,25 +179,32 @@ def export_model_to_onnx(
         model: the PyTorch model to be exported
         model_name: the name for the exported model
         dummy_input: the dummy input to the model
+        input_names: optional names for the model inputs. Defaults to `["input"]` (or `["input", "masks"]`
+            when `dummy_input` is a tuple).
+        output_names: optional names for the model outputs. Defaults to `["logits"]` (or
+            `["logits", "pred_boxes"]` when `dummy_input` is a tuple). Pass the names of every output when
+            the model returns more than one tensor (e.g. a multi-head model).
+        dynamic_axes: optional dynamic axes. Defaults to a dynamic batch dimension on every input and output.
         kwargs: additional arguments to be passed to torch.onnx.export
 
     Returns:
         the path to the exported model
     """
+    is_tuple = isinstance(dummy_input, tuple)
+    if input_names is None:
+        input_names = ["input", "masks"] if is_tuple else ["input"]
+    if output_names is None:
+        output_names = ["logits", "pred_boxes"] if is_tuple else ["logits"]
+    if dynamic_axes is None:
+        dynamic_axes = {name: {0: "batch_size"} for name in [*input_names, *output_names]}
+
     torch.onnx.export(
         model,
         dummy_input,  # type: ignore[arg-type]
         f"{model_name}.onnx",
-        input_names=["input", "masks"] if isinstance(dummy_input, tuple) else ["input"],
-        output_names=["logits", "pred_boxes"] if isinstance(dummy_input, tuple) else ["logits"],
-        dynamic_axes={
-            "input": {0: "batch_size"},
-            "masks": {0: "batch_size"},
-            "logits": {0: "batch_size"},
-            "pred_boxes": {0: "batch_size"},
-        }
-        if isinstance(dummy_input, tuple)
-        else {"input": {0: "batch_size"}, "logits": {0: "batch_size"}},
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
         export_params=True,
         dynamo=False,
         verbose=False,
@@ -272,8 +285,8 @@ def _vocab_projections(model: nn.Module, vocab_size: int) -> list[nn.Linear]:
 def _anyascii_nearest_map(vocab: str, allowed: set[str]) -> dict[str, str]:
     """Map each forbidden character to the visually closest allowed one via transliteration.
 
-    Uses ``anyascii`` to fold characters to their ASCII form (e.g. ``ä -> a``, ``ł -> l``,
-    Cyrillic ``а -> a``); a forbidden character is mapped to an allowed character sharing the
+    Uses `anyascii` to fold characters to their ASCII form (e.g. `ä -> a`, `ł -> l`,
+    Cyrillic `а -> a`); a forbidden character is mapped to an allowed character sharing the
     same ASCII form. Forbidden characters without such a match are left unmapped (they fall
     back to plain masking).
     """
@@ -348,19 +361,19 @@ def add_whitelist(
     """Restrict a recognition model so it can only predict a subset of its vocabulary.
 
     The whitelist is enforced at the model's final projection layer, before the decoding
-    ``argmax``. Because the projection is the single point every logit flows through, the
+    `argmax`. Because the projection is the single point every logit flows through, the
     constraint also applies inside the autoregressive decoding loop of SAR, MASTER and PARSeq,
     so a forbidden character can never be produced -- not even fed back mid-word. The sequence
-    terminator (CTC ``blank`` / attention ``<eos>``) is always kept so decoding still
+    terminator (CTC `blank` / attention `<eos>`) is always kept so decoding still
     terminates. It works with every recognition architecture and with any predictor wrapping
     one (`ocr_predictor`, `kie_predictor`, `recognition_predictor`).
 
     Two strategies are available:
 
-    * ``"mask"`` (default): the logits of forbidden characters are set to ``-inf``, so decoding
+    * `"mask"` (default): the logits of forbidden characters are set to `-inf`, so decoding
       falls back to the highest-scoring allowed character.
-    * ``"nearest"``: the score of each forbidden character is first reassigned to the closest
-      allowed character (so e.g. ``ä`` folds onto ``a``), then forbidden logits are masked.
+    * `"nearest"`: the score of each forbidden character is first reassigned to the closest
+      allowed character (so e.g. `ä` folds onto `a`), then forbidden logits are masked.
       Forbidden characters without a mapping fall back to masking.
 
     A whitelist can only restrict a model to characters it already knows: characters that are
@@ -376,14 +389,14 @@ def add_whitelist(
 
     Args:
         model: an `ocr_predictor`, `kie_predictor`, `recognition_predictor`, or a recognition model.
-        vocabs: a vocabulary string (e.g. ``VOCABS["german"]``) or an iterable of vocabulary
-            strings (e.g. ``[VOCABS["polish"], VOCABS["german"]]``) whose characters are allowed.
-        strategy: ``"mask"`` (default) to drop forbidden characters, or ``"nearest"`` to fold
+        vocabs: a vocabulary string (e.g. `VOCABS["german"]`) or an iterable of vocabulary
+            strings (e.g. `[VOCABS["polish"], VOCABS["german"]]`) whose characters are allowed.
+        strategy: `"mask"` (default) to drop forbidden characters, or `"nearest"` to fold
             them onto the closest allowed character.
-        mapping: only used when ``strategy="nearest"``. ``None`` or ``"anyascii"`` builds the
-            forbidden-to-allowed map by transliteration (the default); ``"weights"`` derives it
-            from the projection weights (the model's own confusions); a ``dict`` of
-            ``{forbidden_char: allowed_char}`` overrides specific characters on top of the
+        mapping: only used when `"strategy="nearest"`". `None` or `"anyascii"` builds the
+            forbidden-to-allowed map by transliteration (the default); `"weights"` derives it
+            from the projection weights (the model's own confusions); a `dict` of
+            `{forbidden_char: allowed_char}` overrides specific characters on top of the
             transliteration map.
         verbose: if True, log how many characters were kept, forbidden and reassigned per model.
 

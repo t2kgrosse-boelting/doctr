@@ -29,6 +29,8 @@ Which predictor should I use?
      - :py:meth:`detection_predictor <doctr.models.detection_predictor>`
    * - Transcribe pre-cropped word images to strings
      - :py:meth:`recognition_predictor <doctr.models.recognition_predictor>`
+   * - Detect the structure of a table (cell bounding-boxes and logical coordinates)
+     - :py:meth:`table_predictor <doctr.models.table_structure.table_predictor>`
 
 For :doc:`custom model loading <custom_models_training>` or sharing models, see the dedicated pages.
 
@@ -121,8 +123,8 @@ Text Recognition
 The task consists of transcribing the character sequence in a given image.
 
 
-Available recognition architectures
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Available architectures
+^^^^^^^^^^^^^^^^^^^^^^^
 
 The following architectures are currently supported:
 
@@ -254,6 +256,84 @@ For instance, this snippet instantiates a layout predictor able to detect text o
 
     from doctr.models import layout_predictor
     predictor = layout_predictor('lw_detr_s', pretrained=True, assume_straight_pages=False, preserve_aspect_ratio=True)
+
+
+Table Structure Recognition
+---------------------------
+
+The task consists of parsing the structure of a table into a machine-understandable representation: localizing every
+cell (its spatial structure) and recovering the row and column it spans (its logical structure).
+
+Available table architectures
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The following architectures are currently supported:
+
+* :py:meth:`tablecenternet <doctr.models.table_structure.tablecenternet>`
+
+For a comprehensive comparison, we have compiled a detailed benchmark on a publicly available dataset:
+
++--------------------------------------------------+-----------------+---------------+--------------+---------------+------------+-------------------+--------------------+
+| **Architecture**                                 | **Input shape** | **# params**  | **Recall**   | **Precision** | **F1**     | **Structure acc** | **sec/it (B: 1)**  |
++==================================================+=================+===============+==============+===============+============+===================+====================+
+| tablecenternet                                   | (1024, 1024, 3) | 7.1 M         | 82.31        | 96.01         | 88.64      | 77.53             | 0.5                |
++--------------------------------------------------+-----------------+---------------+--------------+---------------+------------+-------------------+--------------------+
+
+.. note::
+
+    The reported metrics are produced by ``references/table/evaluate.py`` using the
+    :py:class:`TableCellMetric <doctr.utils.metrics.TableCellMetric>`: cell-detection **Recall**, **Precision** and
+    **F1** (cells matched above an IoU threshold of 0.5), and **Structure acc**, the share of matched cells whose
+    logical (row/column) coordinates are correctly predicted.
+
+Table structure predictors
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:meth:`table_predictor <doctr.models.table_structure.table_predictor>` wraps your table model so it can be used directly on
+document images. For each page it returns the list of detected cells, each with its geometry, its confidence score and its logical coordinates, together with the inferred number of rows
+and columns.
+
+.. code:: python3
+
+    import numpy as np
+    from doctr.models import table_predictor
+    model = table_predictor('tablecenternet', pretrained=True)
+    table_crop = (255 * np.random.rand(800, 600, 3)).astype(np.uint8)
+    out = model([table_crop])
+    # out[0] -> {"cells": [{"geometry": ..., "score": ..., "row_start": 0, "row_end": 0,
+    #            "col_start": 0, "col_end": 0}, ...], "num_rows": ..., "num_cols": ...}
+
+Tables in the OCR pipeline
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Passing ``detect_tables=True`` to :py:meth:`ocr_predictor <doctr.models.ocr_predictor>` runs table structure
+recognition. It relies on the layout model: each region the layout model labels as
+a table is cropped and passed to the table model, so a page yields one structured table per detected table region
+(``detect_tables=True`` therefore also enables the layout model, whose regions are attached to the page). The words
+whose center falls inside a detected cell are regrouped into a structured table, attached to the page as
+``page.tables``, and **removed from the regular** ``blocks`` **output** so the same text is not returned twice. Each
+table exposes a dense row/column grid that loads directly into pandas.
+
+.. code:: python3
+
+    from doctr.io import DocumentFile
+    from doctr.models import ocr_predictor
+
+    model = ocr_predictor(pretrained=True, detect_tables=True)
+    doc = DocumentFile.from_images("invoice_with_table.png")
+    result = model(doc)
+
+    page = result.pages[0]
+    # Structured tables (one or more per page), kept out of the regular text blocks
+    for i, table in enumerate(page.tables):
+        df = table.to_grid()  # for a plain list of lists
+        print(f"Table {i} ({table.num_rows}x{table.num_cols}):")
+        print(df)
+
+    # The remaining (non-table) text is still available as usual
+    print(page.render())
+
+Tables are included in :meth:`Page.export` under the ``tables`` key, so they are preserved in the JSON export as well.
 
 
 End-to-End OCR
@@ -673,4 +753,3 @@ learned confusions, or a ``{forbidden_char: allowed_char}`` dict to override spe
     handle = add_whitelist(predictor, VOCABS["latin"], strategy="nearest")
     out = predictor(input_page)
     handle.remove()
-

@@ -148,7 +148,7 @@ def get_colors(num_colors: int) -> list[tuple[float, float, float]]:
         hue = i / 360.0
         lightness = (50 + np.random.rand() * 10) / 100.0
         saturation = (90 + np.random.rand() * 10) / 100.0
-        colors.append(colorsys.hls_to_rgb(hue, lightness, saturation))  # type: ignore[arg-type]
+        colors.append(colorsys.hls_to_rgb(hue, lightness, saturation))
     return colors
 
 
@@ -403,7 +403,7 @@ def draw_boxes(boxes: np.ndarray, image: np.ndarray, color: tuple[int, int, int]
     """Draw an array of relative straight boxes on an image.
 
     Args:
-        boxes: array of relative boxes, of shape ``(*, 4)``
+        boxes: array of relative boxes, of shape `(*, 4)`
         image: np array, float32 or uint8
         color: color to use for bounding box edges
         **kwargs: keyword arguments from `matplotlib.pyplot.plot`

@@ -7,7 +7,7 @@
 import numpy as np
 from anyascii import anyascii
 from scipy.optimize import linear_sum_assignment
-from shapely import area, intersection, polygons
+from shapely import STRtree, area, intersection, polygons
 
 __all__ = [
     "TextMatch",
@@ -146,7 +146,7 @@ def box_iou(boxes_1: np.ndarray, boxes_2: np.ndarray) -> np.ndarray:
 
         intersection = np.clip(right - left, 0, np.inf) * np.clip(bot - top, 0, np.inf)
         union = (r1 - l1) * (b1 - t1) + ((r2 - l2) * (b2 - t2)).T - intersection
-        iou_mat = intersection / union
+        iou_mat = np.divide(intersection, union, out=np.zeros_like(intersection), where=union > 0)
 
     return iou_mat
 
@@ -170,18 +170,15 @@ def polygon_iou(polys_1: np.ndarray, polys_2: np.ndarray) -> np.ndarray:
 
     geoms_1 = polygons(polys_1)
     geoms_2 = polygons(polys_2)
-    grid_1 = np.repeat(geoms_1, m)
-    grid_2 = np.tile(geoms_2, n)
 
-    # Compute intersections and areas
-    intersections = area(intersection(grid_1, grid_2))
-    areas_1 = area(grid_1)
-    areas_2 = area(grid_2)
-
-    # Compute IoU
-    unions = areas_1 + areas_2 - intersections
-    iou_flat = np.divide(intersections, unions, out=np.zeros_like(intersections), where=unions > 0)
-    return iou_flat.reshape(n, m).astype(np.float32)
+    iou_mat = np.zeros((n, m), dtype=np.float32)
+    idcs_1, idcs_2 = STRtree(geoms_2).query(geoms_1)
+    if idcs_1.size > 0:
+        # Compute intersections and areas for the candidate pairs only
+        intersections = area(intersection(geoms_1[idcs_1], geoms_2[idcs_2]))
+        unions = area(geoms_1)[idcs_1] + area(geoms_2)[idcs_2] - intersections
+        iou_mat[idcs_1, idcs_2] = np.divide(intersections, unions, out=np.zeros_like(intersections), where=unions > 0)
+    return iou_mat
 
 
 def nms(boxes: np.ndarray, thresh: float = 0.5) -> list[int]:
@@ -275,7 +272,7 @@ class LocalizationConfusion:
             gts: a set of relative bounding boxes either of shape (N, 4) or (N, 5) if they are rotated ones
             preds: a set of relative bounding boxes either of shape (M, 4) or (M, 5) if they are rotated ones
         """
-        if preds.shape[0] > 0:
+        if gts.shape[0] > 0 and preds.shape[0] > 0:
             # Compute IoU
             if self.use_polygons:
                 iou_mat = polygon_iou(gts, preds)
@@ -318,25 +315,30 @@ class LocalizationConfusion:
 class TableCellMetric:
     r"""Implements a table-structure-recognition metric.
 
-    Predicted cells are matched to ground-truth cells by maximising the total polygon IoU (Hungarian
-    assignment); a pair counts as a match when its IoU is at least ``iou_thresh``. From the matches it
-    reports cell-detection recall / precision / F1 and the **structure accuracy** (the fraction of matched
-    cells whose logical coordinates ``[start_col, end_col, start_row, end_row]`` exactly equal the
-    ground-truth ones).
+    Predicted cells are matched to ground-truth cells by maximising the total IoU (Hungarian assignment); a pair
+    counts as a match when its IoU is at least `iou_thresh`. From the matches it reports cell-detection recall,
+    precision, F1 and the **structure accuracy** (the fraction of matched cells whose logical coordinates
+    `[start_col, end_col, start_row, end_row]` exactly equal the ground-truth ones).
 
     >>> import numpy as np
     >>> from doctr.utils import TableCellMetric
     >>> metric = TableCellMetric(iou_thresh=0.5)
-    >>> gt = np.array([[[0, 0], [1, 0], [1, 1], [0, 1]]], dtype=np.float32)
+    >>> gt = np.array([[0, 0, 1, 1]], dtype=np.float32)
     >>> metric.update(gt, np.array([[0, 0, 0, 0]]), gt, np.array([[0, 0, 0, 0]]))
     >>> metric.summary()
 
     Args:
-        iou_thresh: minimum polygon IoU for a predicted/ground-truth cell pair to be considered a match
+        iou_thresh: minimum IoU for a predicted/ground-truth cell pair to be considered a match
+        use_polygons: if set to True, predictions and targets will be expected to have polygon format
     """
 
-    def __init__(self, iou_thresh: float = 0.5) -> None:
+    def __init__(
+        self,
+        iou_thresh: float = 0.5,
+        use_polygons: bool = False,
+    ) -> None:
         self.iou_thresh = iou_thresh
+        self.use_polygons = use_polygons
         self.reset()
 
     def update(
@@ -349,9 +351,9 @@ class TableCellMetric:
         """Update the metric with one sample.
 
         Args:
-            gt_cells: ground-truth cell polygons, shape (N, 4, 2)
+            gt_cells: ground-truth cells, shape (N, 4) or (N, 4, 2) when `use_polygons=True`
             gt_logic: ground-truth logical coordinates, shape (N, 4)
-            pred_cells: predicted cell polygons, shape (M, 4, 2)
+            pred_cells: predicted cells, shape (M, 4) or (M, 4, 2) when `use_polygons=True`
             pred_logic: predicted logical coordinates, shape (M, 4)
         """
         self.num_gts += gt_cells.shape[0]
@@ -359,7 +361,10 @@ class TableCellMetric:
         if gt_cells.shape[0] == 0 or pred_cells.shape[0] == 0:
             return
 
-        iou_mat = polygon_iou(gt_cells, pred_cells)  # (N, M)
+        if self.use_polygons:
+            iou_mat = polygon_iou(gt_cells, pred_cells)
+        else:
+            iou_mat = box_iou(gt_cells, pred_cells)
         gt_idx, pred_idx = linear_sum_assignment(-iou_mat)
         for gi, pi in zip(gt_idx, pred_idx):
             if iou_mat[gi, pi] >= self.iou_thresh:
@@ -371,7 +376,7 @@ class TableCellMetric:
         """Compute the aggregated metrics.
 
         Returns:
-            a dict with ``recall``, ``precision``, ``f1`` (cell detection) and ``structure_acc``
+            a dict with `recall`, `precision`, `f1` (cell detection) and `structure_acc`
         """
         recall = self.matches / self.num_gts if self.num_gts > 0 else None
         precision = self.matches / self.num_preds if self.num_preds > 0 else None
@@ -460,8 +465,7 @@ class OCRMetric:
                 "there should be the same number of boxes and string both for the ground truth and the predictions"
             )
 
-        # Compute IoU
-        if pred_boxes.shape[0] > 0:
+        if gt_boxes.shape[0] > 0 and pred_boxes.shape[0] > 0:
             if self.use_polygons:
                 iou_mat = polygon_iou(gt_boxes, pred_boxes)
             else:
@@ -590,8 +594,7 @@ class DetectionMetric:
                 "there should be the same number of boxes and string both for the ground truth and the predictions"
             )
 
-        # Compute IoU
-        if pred_boxes.shape[0] > 0:
+        if gt_boxes.shape[0] > 0 and pred_boxes.shape[0] > 0:
             if self.use_polygons:
                 iou_mat = polygon_iou(gt_boxes, pred_boxes)
             else:

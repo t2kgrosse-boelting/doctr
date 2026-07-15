@@ -16,7 +16,7 @@ from torch.nn import functional as F
 
 from doctr.models.classification import vit_det_m, vit_det_s
 
-from ...utils import load_pretrained_params
+from ...utils import _bf16_to_float32, load_pretrained_params
 from .base import _LWDETR, LWDETRPostProcessor
 from .layers import (
     LWDETRDecoder,
@@ -188,20 +188,20 @@ class LWDETRBackbone(nn.Module):
             num_blocks=num_blocks,
         )
 
-    def _resize_padding_mask(self, mask: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
-        """Resize padding mask to feature-map size
+    def _resize_valid_mask(self, mask: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
+        """Resize the valid-pixel mask to feature-map size
 
         Args:
-            mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+            mask: a binary mask of shape [batch_size x H x W], containing True on valid (non-padded) pixels
             size: the target size (H', W') for the resized mask
 
         Returns:
-            resized_mask: a binary mask of shape [batch_size x H' x W'], containing 1 on padded pixels
+            resized_mask: a binary mask of shape [batch_size x H' x W'], containing True on valid positions
         """
         if mask.dtype != torch.bool:
             mask = mask.bool()
 
-        valid = (~mask).float().unsqueeze(1)  # True/1 = valid pixels
+        valid = mask.float().unsqueeze(1)  # True/1 = valid pixels
 
         # Data-dependent sanity checks
         if self.training:  # pragma: no cover
@@ -215,14 +215,12 @@ class LWDETRBackbone(nn.Module):
         h_in, w_in = int(mask.shape[-2]), int(mask.shape[-1])
         h_out, w_out = int(size[0]), int(size[1])
         kh, kw = h_in // h_out, w_in // w_out
-        valid_resized = F.max_pool2d(valid, kernel_size=(kh, kw), stride=(kh, kw)) > 0
-
-        resized_mask = ~valid_resized.squeeze(1)
+        resized_mask = (F.max_pool2d(valid, kernel_size=(kh, kw), stride=(kh, kw)) > 0).squeeze(1)
 
         # Data-dependent sanity checks
         if self.training:  # pragma: no cover
-            if resized_mask.flatten(1).all(dim=1).any():
-                bad = torch.where(resized_mask.flatten(1).all(dim=1))[0].tolist()
+            if (~resized_mask).flatten(1).all(dim=1).any():
+                bad = torch.where((~resized_mask).flatten(1).all(dim=1))[0].tolist()
                 raise RuntimeError(f"Feature masks became fully padded after resizing: {bad}")
 
         return resized_mask
@@ -232,20 +230,21 @@ class LWDETRBackbone(nn.Module):
 
         Args:
             x: batched images, of shape [batch_size x 3 x H x W]
-            mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+            mask: a binary mask of shape [batch_size x H x W], containing True on valid (non-padded) pixels
 
         Returns:
             A list of tuples (feat, mask) for each feature map, where:
             - feat is the feature map of shape [batch_size x out_channels x H' x W']
-            - mask is the corresponding attention mask of shape [batch_size x H' x W'], containing 1 on padded pixels
+            - mask is the corresponding valid mask of shape [batch_size x H' x W'], True on valid positions
         """
         # (H, W, B, C)
         feats = self.encoder(x)
         feats = self.projector(feats)
         # [(B, C, H, W)]
         if mask is None:  # pragma: no cover
-            mask = torch.zeros((x.shape[0], x.shape[2], x.shape[3]), dtype=torch.bool, device=x.device)
-        return [(feat, self._resize_padding_mask(mask, feat.shape[2:])) for feat in feats]
+            # No mask provided: consider every pixel as valid image content
+            mask = torch.ones((x.shape[0], x.shape[2], x.shape[3]), dtype=torch.bool, device=x.device)
+        return [(feat, self._resize_valid_mask(mask, feat.shape[2:])) for feat in feats]
 
 
 class LWDETR(nn.Module, _LWDETR):
@@ -275,7 +274,7 @@ class LWDETR(nn.Module, _LWDETR):
         self,
         feat_extractor: LWDETRBackbone,
         class_names: list[str],
-        score_thresh: float = 0.25,
+        score_thresh: float = 0.5,
         iou_thresh: float = 0.5,
         d_model: int = 256,
         num_queries: int = 195,
@@ -391,13 +390,13 @@ class LWDETR(nn.Module, _LWDETR):
         load_pretrained_params(self, path_or_url, **kwargs)
 
     def gen_encoder_output_proposals(
-        self, enc_output: torch.Tensor, padding_mask: torch.Tensor, spatial_shapes: list[tuple[int, int]]
+        self, enc_output: torch.Tensor, valid_mask: torch.Tensor, spatial_shapes: list[tuple[int, int]]
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate the encoder output proposals from encoded enc_output.
 
         Args:
             enc_output: Output of the encoder
-            padding_mask: Padding mask for `enc_output`
+            valid_mask: Valid-position mask for `enc_output` (True on valid, non-padded positions)
             spatial_shapes: Spatial shapes of the feature maps
 
         Returns:
@@ -442,7 +441,7 @@ class LWDETR(nn.Module, _LWDETR):
         spatial_valid = ((output_proposals[..., :4] > 0.01) & (output_proposals[..., :4] < 0.99)).all(
             dim=-1, keepdim=True
         )
-        invalid_mask = padding_mask.unsqueeze(-1) | ~spatial_valid
+        invalid_mask = ~valid_mask.unsqueeze(-1) | ~spatial_valid
 
         output_proposals = output_proposals.masked_fill(invalid_mask, 0.0)
         object_query = enc_output.masked_fill(invalid_mask, 0.0)
@@ -555,6 +554,9 @@ class LWDETR(nn.Module, _LWDETR):
         pred_boxes = refine_obb_boxes(intermediate_reference_points[-1], pred_boxes_delta)
 
         out: dict[str, Any] = {}
+
+        logits = _bf16_to_float32(logits)
+        pred_boxes = _bf16_to_float32(pred_boxes)
 
         if self.exportable:
             out["logits"] = logits
@@ -698,7 +700,7 @@ class LWDETR(nn.Module, _LWDETR):
 
                 cost = 2.0 * cost_class + 5.0 * cost_bbox + 2.0 * cost_iou
 
-                query_idx, tgt_idx = linear_sum_assignment(cost.cpu().numpy())
+                query_idx, tgt_idx = linear_sum_assignment(cost.detach().cpu().numpy())
                 indices.append((
                     torch.as_tensor(query_idx, dtype=torch.long, device=device),
                     torch.as_tensor(tgt_idx, dtype=torch.long, device=device),

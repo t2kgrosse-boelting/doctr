@@ -48,6 +48,11 @@ def test_encode_string_unknown_char():
         utils.encode_string("abc", "xyz")
 
 
+def test_encode_string_duplicate_vocab_chars():
+    # Duplicated characters map to their first occurrence, like str.index
+    assert utils.encode_string("aba", "aba") == [0, 1, 0]
+
+
 def test_decode_sequence():
     mapping = "abcdef"
     with pytest.raises(TypeError):
@@ -58,6 +63,10 @@ def test_decode_sequence():
         utils.decode_sequence(np.array([2, 4.5]), mapping)
 
     assert utils.decode_sequence([3, 4, 3, 4], mapping) == "dede"
+    assert utils.decode_sequence(np.array([3, 4, 3, 4], dtype=np.int64), mapping) == "dede"
+    assert utils.decode_sequence(np.array([3, 4, 3, 4], dtype=np.int32), mapping) == "dede"
+    # empty sequences decode to an empty string instead of raising on .max()
+    assert utils.decode_sequence(np.array([], dtype=np.int64), mapping) == ""
 
 
 @pytest.mark.parametrize(
